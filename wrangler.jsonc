@@ -1,0 +1,16 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "bcaway-notifications",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-02-24",
+  "compatibility_flags": [
+    "nodejs_compat"
+  ],
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "bcaway-notifications",
+      "database_id": "49ef5aad-70f7-408c-bcbf-dacfe9ca07f4"
+    }
+  ]
+}
