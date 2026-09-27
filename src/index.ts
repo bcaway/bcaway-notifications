@@ -382,71 +382,134 @@ export default {
           return jsonResponse({ success: true, message: 'No events provided', processed: 0 });
         }
 
-        const results = [];
-
+        // 1. Filter and validate incoming events
+        const validEvents: AbsenceEvent[] = [];
         for (const raw of rawEvents) {
           const type = String(raw.type || '').toLowerCase();
           const teacher = String(raw.teacher || '').trim();
           const periodsImpacted = raw.periodsImpacted ? String(raw.periodsImpacted).trim() : undefined;
 
-          if (!['inserted', 'updated', 'removed'].includes(type) || !teacher) {
-            continue;
+          if (['inserted', 'updated', 'removed'].includes(type) && teacher) {
+            validEvents.push({
+              type: type as 'inserted' | 'updated' | 'removed',
+              teacher,
+              periodsImpacted,
+            });
           }
+        }
 
-          const { title, body: msgBody } = buildAbsenceNotification({
-            type: type as 'inserted' | 'updated' | 'removed',
-            teacher,
-            periodsImpacted,
-          });
+        if (validEvents.length === 0) {
+          return jsonResponse({ success: true, message: 'No valid events found', processed: 0 });
+        }
 
-          // Query all tokens subscribed to this teacher
+        // 2. Map each device token to the events that impact its starred teachers
+        const tokenEventsMap = new Map<string, AbsenceEvent[]>();
+
+        for (const event of validEvents) {
           const { results: tokenRows } = await env.DB.prepare(
             `SELECT DISTINCT token FROM token_starred_teachers 
              WHERE teacher_name = ?1 COLLATE NOCASE`
           )
-            .bind(teacher)
+            .bind(event.teacher)
             .all<{ token: string }>();
 
-          const tokens = (tokenRows || []).map(r => r.token);
+          for (const row of tokenRows || []) {
+            const list = tokenEventsMap.get(row.token) || [];
+            list.push(event);
+            tokenEventsMap.set(row.token, list);
+          }
+        }
 
-          if (tokens.length === 0) {
-            results.push({
-              teacher,
-              type,
-              tokensNotified: 0,
-              reason: 'No subscribers for this teacher',
-            });
-            continue;
+        if (tokenEventsMap.size === 0) {
+          return jsonResponse({
+            success: true,
+            message: 'No subscribers for any affected teachers',
+            processed: validEvents.length,
+            tokensTargeted: 0,
+          });
+        }
+
+        // 3. Group tokens by the message they should receive
+        // Single teacher -> "Teacher Absence: {Teacher}" / "{Teacher} is absent today..."
+        // Multiple teachers -> "Your Absences Have Been Updated" / "Check BCAway for today's absences"
+        const messageGroups = new Map<
+          string,
+          { title: string; body: string; tokens: string[]; data: Record<string, unknown> }
+        >();
+
+        for (const [token, events] of tokenEventsMap.entries()) {
+          // Deduplicate by teacher name (case-insensitive) for this token
+          const uniqueTeacherEvents = Array.from(
+            new Map(events.map(e => [e.teacher.toLowerCase(), e])).values()
+          );
+
+          let title = '';
+          let bodyText = '';
+          let dataPayload: Record<string, unknown> = {};
+
+          if (uniqueTeacherEvents.length === 1) {
+            const single = uniqueTeacherEvents[0];
+            const notif = buildAbsenceNotification(single);
+            title = notif.title;
+            bodyText = notif.body;
+            dataPayload = {
+              type: 'teacher_absence',
+              changeType: single.type,
+              teacher: single.teacher,
+              periodsImpacted: single.periodsImpacted,
+            };
+          } else {
+            // Multiple starred teachers updated in the same sync
+            title = 'Your Absences Have Been Updated';
+            bodyText = "Check BCAway for today's absences";
+            dataPayload = {
+              type: 'teacher_absences_multi',
+              teacherCount: uniqueTeacherEvents.length,
+              teachers: uniqueTeacherEvents.map(e => e.teacher),
+            };
           }
 
-          const sendResult = await sendExpoPush(
-            {
-              tokens,
+          const groupKey = `${title}|||${bodyText}`;
+          const existing = messageGroups.get(groupKey);
+          if (existing) {
+            existing.tokens.push(token);
+          } else {
+            messageGroups.set(groupKey, {
               title,
-              body: msgBody,
-              data: {
-                type: 'teacher_absence',
-                changeType: type,
-                teacher,
-                periodsImpacted,
-              },
+              body: bodyText,
+              tokens: [token],
+              data: dataPayload,
+            });
+          }
+        }
+
+        // 4. Dispatch Expo push notifications in batches
+        let totalSent = 0;
+        let totalFailed = 0;
+        let totalPurged = 0;
+
+        for (const group of messageGroups.values()) {
+          const res = await sendExpoPush(
+            {
+              tokens: group.tokens,
+              title: group.title,
+              body: group.body,
+              data: group.data,
             },
             env
           );
-
-          results.push({
-            teacher,
-            type,
-            tokensTargeted: tokens.length,
-            sent: sendResult.sent,
-            failed: sendResult.failed,
-          });
+          totalSent += res.sent;
+          totalFailed += res.failed;
+          totalPurged += res.purged;
         }
 
         return jsonResponse({
           success: true,
-          processed: results.length,
-          results,
+          eventsProcessed: validEvents.length,
+          tokensNotified: tokenEventsMap.size,
+          messagesSent: totalSent,
+          messagesFailed: totalFailed,
+          tokensPurged: totalPurged,
         });
       } catch (err) {
         console.error('[NotifyAbsence] Error:', err);
