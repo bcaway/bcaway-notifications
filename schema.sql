@@ -3,7 +3,9 @@ CREATE TABLE IF NOT EXISTS push_tokens (
     token TEXT NOT NULL UNIQUE,
     platform TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_notified_at INTEGER DEFAULT 0,
+    last_notified_msg TEXT DEFAULT ''
 );
 
 CREATE TABLE IF NOT EXISTS token_starred_teachers (

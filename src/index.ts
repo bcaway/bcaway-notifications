@@ -483,24 +483,65 @@ export default {
           }
         }
 
-        // 4. Dispatch Expo push notifications in batches
+        // 4. Dispatch Expo push notifications in batches with deduplication
         let totalSent = 0;
         let totalFailed = 0;
         let totalPurged = 0;
+        let totalDeduped = 0;
+        const nowMs = Date.now();
+        const DEDUPE_WINDOW_MS = 25000; // 25-second deduplication cooldown window
 
-        for (const group of messageGroups.values()) {
+        for (const [groupKey, group] of messageGroups.entries()) {
+          // Check for rapid duplicate sends to these tokens with the same message content
+          const tokensToSend: string[] = [];
+
+          for (const tok of group.tokens) {
+            const row = await env.DB.prepare(
+              'SELECT last_notified_at, last_notified_msg FROM push_tokens WHERE token = ?1'
+            )
+              .bind(tok)
+              .first<{ last_notified_at: number; last_notified_msg: string }>();
+
+            if (row && row.last_notified_at) {
+              const timeSinceLast = nowMs - Number(row.last_notified_at);
+              const sameContent = (row.last_notified_msg || '') === groupKey;
+
+              if (timeSinceLast < DEDUPE_WINDOW_MS && sameContent) {
+                console.log(`[Dedupe] Suppressed duplicate notification for ${tok.slice(0, 25)}... within ${timeSinceLast}ms.`);
+                totalDeduped++;
+                continue;
+              }
+            }
+
+            tokensToSend.push(tok);
+          }
+
+          if (tokensToSend.length === 0) {
+            continue;
+          }
+
           const res = await sendExpoPush(
             {
-              tokens: group.tokens,
+              tokens: tokensToSend,
               title: group.title,
               body: group.body,
               data: group.data,
             },
             env
           );
+
           totalSent += res.sent;
           totalFailed += res.failed;
           totalPurged += res.purged;
+
+          // Record last notification timestamp and message for these tokens
+          for (const tok of tokensToSend) {
+            await env.DB.prepare(
+              'UPDATE push_tokens SET last_notified_at = ?1, last_notified_msg = ?2 WHERE token = ?3'
+            )
+              .bind(nowMs, groupKey, tok)
+              .run();
+          }
         }
 
         return jsonResponse({
@@ -509,6 +550,7 @@ export default {
           tokensNotified: tokenEventsMap.size,
           messagesSent: totalSent,
           messagesFailed: totalFailed,
+          messagesDeduped: totalDeduped,
           tokensPurged: totalPurged,
         });
       } catch (err) {
