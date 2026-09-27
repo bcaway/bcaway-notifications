@@ -87,6 +87,19 @@ export function formatAbsenceData(periodsImpacted?: string): string {
   const trimmed = periodsImpacted.trim();
   const lower = trimmed.toLowerCase();
   if (lower === 'all' || lower === 'all day') return 'All Day';
+
+  // Check if it represents all periods (1-9 and optional igs)
+  const tokens = lower
+    .replace(/^periods?:?\s*/i, '')
+    .split(',')
+    .map(s => s.trim())
+    .filter(Boolean);
+
+  const numTokens = new Set(tokens.filter(t => /^[1-9]$/.test(t)));
+  if (numTokens.size >= 9 || tokens.length >= 10) {
+    return 'All Day';
+  }
+
   if (lower.startsWith('period') || lower.startsWith('mod')) return trimmed;
   return `Periods: ${trimmed}`;
 }
